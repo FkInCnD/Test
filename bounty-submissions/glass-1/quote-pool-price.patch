@@ -1,0 +1,55 @@
+--- a/src/lib/market.js
++++ b/src/lib/market.js
+@@ -130,7 +130,12 @@
+         dex: d.relationships?.dex?.data?.id,
+         createdAt: d.attributes?.pool_created_at ? Date.parse(d.attributes.pool_created_at) : null,
+         fdvUsd: d.attributes?.fdv_usd ? Number(d.attributes.fdv_usd) : null,
+-        priceUsd: d.attributes?.base_token_price_usd ? Number(d.attributes.base_token_price_usd) : null,
++        priceUsd: (() => {
++          // The requested mint can be the quote asset (e.g. USDC / TARGET).
++          const side = d.relationships?.quote_token?.data?.id === `solana_${mint}` ? 'quote' : 'base';
++          const price = d.attributes?.[`${side}_token_price_usd`];
++          return price ? Number(price) : null;
++        })(),
+         reserveUsd: d.attributes?.reserve_in_usd ? Number(d.attributes.reserve_in_usd) : null,
+         volume24h: d.attributes?.volume_usd?.h24 ? Number(d.attributes.volume_usd.h24) : null,
+       }));
+--- /dev/null
++++ b/test/gecko-pool-price.test.mjs
+@@ -0,0 +1,35 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { geckoTopPool } from '../src/lib/market.js';
++
++test('geckoTopPool reports the requested token price on either side of a pool', async (t) => {
++  const original = globalThis.fetch;
++  t.after(() => { globalThis.fetch = original; });
++  for (const side of ['base', 'quote']) {
++    await t.test(side, async () => {
++      const mint = `target-${side}`;
++      globalThis.fetch = async () => Response.json({ data: [{
++        attributes: {
++          address: 'pool', reserve_in_usd: '10000',
++          base_token_price_usd: side === 'base' ? '0.002' : '1',
++          quote_token_price_usd: side === 'quote' ? '0.002' : '1',
++        },
++        relationships: {
++          base_token: { data: { id: `solana_${side === 'base' ? mint : 'USDC'}` } },
++          quote_token: { data: { id: `solana_${side === 'quote' ? mint : 'USDC'}` } },
++        },
++      }] });
++      const { top } = await geckoTopPool(mint);
++      assert.equal(top.priceUsd, 0.002);
++      assert.equal(top.reserveUsd, 10000);
++    });
++  }
++  await t.test('missing quote price stays unknown instead of returning the USDC price', async () => {
++    globalThis.fetch = async () => Response.json({ data: [{
++      attributes: { address: 'missing', base_token_price_usd: '1' },
++      relationships: { quote_token: { data: { id: 'solana_missing-price' } } },
++    }] });
++    const { top } = await geckoTopPool('missing-price');
++    assert.equal(top.priceUsd, null);
++  });
++});
+
